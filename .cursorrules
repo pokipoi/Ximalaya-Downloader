@@ -1,0 +1,14 @@
+# AI Behavior Constraints
+
+1.  **Environment Rules**:
+    *   **ALWAYS** use the existing Conda environment named `dev`.
+    *   **NEVER** create new virtual environments (venv, virtualenv, etc.).
+    *   **NEVER** suggest installing new global Python versions.
+    *   When running Python scripts in the terminal, **ALWAYS** ensure `conda activate dev` is active or use the full path: `C:\Users\WorkUser\miniconda3\envs\dev\python.exe`.
+
+2.  **Package Management**:
+    *   If packages are missing, install them into the `dev` environment using `pip install` or `conda install` while the environment is active.
+
+3.  **Project Context**:
+    *   This is a Python project for downloading from Ximalaya.
+    *   Entry points are `cli.py` (CLI interface) and `main.py` (Core logic).

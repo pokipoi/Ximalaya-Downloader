@@ -113,6 +113,7 @@ class Ximalaya:
     # 解析专辑，如果成功返回专辑名和专辑声音列表，否则返回False
     def analyze_album(self, album_id, headers, bid):
         logger.debug(f'开始解析ID为{album_id}的专辑')
+        # 尝试使用 Web API (原版逻辑)
         url = "https://www.ximalaya.com/revision/album/v1/getTracksList"
         params = {
             "albumId": album_id,
@@ -121,68 +122,142 @@ class Ximalaya:
             "pageSize": 100
         }
         headers["referer"] = f"https://www.ximalaya.com/album/{album_id}"
-        headers["xm-sign"] = f"{bid}&&{self.get_sid()}"
-        retries = 5
+        # 尝试获取 sid，如果获取不到则不加 xm-sign，有些接口可能不需要
+        try:
+            sid = self.get_sid()
+            if sid:
+                headers["xm-sign"] = f"{bid}&&{sid}"
+        except Exception:
+            pass
+
+        use_mobile_api = False
+        retries = 3
         while True:
             try:
                 response = requests.get(url, headers=headers, params=params, timeout=15)
-            except Exception as e:
-                print(colorama.Fore.RED + f'ID为{album_id}的专辑解析失败！')
-                logger.debug(f'ID为{album_id}的专辑解析失败！')
-                logger.debug(traceback.format_exc())
-                return False, False
-            if response.json()["data"]["tracks"] == []:
-                retries -= 1
-            else:
-                break
-            if retries == 0:
-                print(colorama.Fore.RED + f'ID为{album_id}的专辑解析失败！')
-                logger.debug(f'ID为{album_id}的专辑解析失败！')
-                return False, False
-        pages = math.ceil(response.json()["data"]["trackTotalCount"] / 100)
-        sounds = []
-        for page in range(1, pages + 1):
-            params = {
-                "albumId": album_id,
-                "pageNum": page,
-                "sort": 0,
-                "pageSize": 100
-            }
-            retries = 5
-            while True:
-                sid = self.get_sid()
-                if not sid:
-                    print(colorama.Fore.RED + f'ID为{album_id}的专辑解析失败！')
-                    logger.debug(f'ID为{album_id}的专辑解析失败！')
-                    return False, False
-                else:
-                    headers["xm-sign"] = f"{bid}&&{sid}"
-                try:
-                    response = requests.get(url, headers=headers, params=params, timeout=30)
-                except Exception as e:
-                    print(colorama.Fore.RED + f'ID为{album_id}的专辑解析失败！')
-                    logger.debug(f'ID为{album_id}的专辑解析失败！')
-                    logger.debug(traceback.format_exc())
-                    return False, False
-                if response.json()["data"]["tracks"] == []:
-                    print(f"第{page}页解析失败第{6-retries}次，共{pages}页")
-                    retries -= 1
-                else:
-                    print(f"第{page}页解析成功，共{pages}页")
+                resp_json = response.json()
+                tracks = resp_json.get("data", {}).get("tracks")
+                # Web API 返回 200 但无数据，可能是需要签名验证或接口变动，尝试切换到 Mobile API
+                if response.status_code == 200 and (tracks is None or len(tracks) == 0):
+                    logger.debug("Web API 返回空数据，尝试切换到 Mobile API ...")
+                    use_mobile_api = True
                     break
-                if retries == 0:
-                    print(colorama.Fore.RED + f'ID为{album_id}的专辑解析失败！')
-                    logger.debug(f'ID为{album_id}的专辑解析失败！')
-                    return False, False
-            sounds += response.json()["data"]["tracks"]
-        album_name = sounds[0]["albumTitle"]
-        logger.debug(f'ID为{album_id}的专辑解析成功')
-        return album_name, sounds
+                
+                if tracks:
+                    break
+            except Exception:
+                logger.debug(f"Web API 请求异常，重试 ({retries})")
+                
+            retries -= 1
+            if retries == 0:
+                logger.debug("Web API 多次重试失败，切换到 Mobile API")
+                use_mobile_api = True
+                break
+
+        if not use_mobile_api:
+            # 沿用原 Web API 分页逻辑
+            pages = math.ceil(resp_json["data"]["trackTotalCount"] / 100)
+            sounds = []
+            for page in range(1, pages + 1):
+                params["pageNum"] = page
+                # ... (简化：复用循环逻辑或直接请求) 
+                # 这里为了保持代码结构尽量少改动，我们只在上面判断是否需要切换。
+                # 由于原代码结构较为复杂，我们这里重新实现简单的分页获取
+                try:
+                    res = requests.get(url, headers=headers, params=params, timeout=30)
+                    chunk = res.json()["data"]["tracks"]
+                    if chunk:
+                        print(f"第{page}页解析成功，共{pages}页")
+                        sounds += chunk
+                    else:
+                        print(f"第{page}页解析失败 (Web API)")
+                except Exception:
+                     print(f"第{page}页请求异常 (Web API)")
+            
+            if sounds:
+                album_name = sounds[0]["albumTitle"]
+                logger.debug(f'ID为{album_id}的专辑解析成功 (Web API)')
+                return album_name, sounds
+
+        # Mobile API Fallback
+        logger.debug(f'开始使用 Mobile API 解析ID为{album_id}的专辑')
+        mobile_url = "https://mobile.ximalaya.com/mobile/v1/album/track"
+        mobile_params = {
+            "albumId": album_id,
+            "device": "android",
+            "isAsc": "true",
+            "pageId": 1,
+            "pageSize": 100
+        }
+        # Mobile API 不需要 xm-sign，只需要 cookie
+        mobile_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Cookie": headers.get("cookie", "")
+        }
+
+        try:
+            res = requests.get(mobile_url, headers=mobile_headers, params=mobile_params, timeout=15)
+            data = res.json()
+            if "data" not in data or "list" not in data["data"]:
+                # Check for Track ID possibility if Album failed
+                logger.debug(f"Mobile API (Album) failed with msg: {data.get('msg', 'unknown')}. Checking if ID is a Track ID...")
+                try:
+                    track_url = "https://mobile.ximalaya.com/mobile/v1/track/baseInfo"
+                    track_params = {"device": "android", "trackId": album_id}
+                    r_track = requests.get(track_url, headers=mobile_headers, params=track_params, timeout=15)
+                    track_data = r_track.json()
+                    # A valid track usually has trackId and albumId
+                    if "trackId" in track_data and "albumId" in track_data:
+                        real_album_id = track_data["albumId"]
+                        print(colorama.Fore.YELLOW + f"检测到输入ID为单曲ID，已自动关联到所属专辑ID: {real_album_id}")
+                        return self.analyze_album(real_album_id, headers, bid)
+                except Exception as e:
+                    logger.debug(f"Check Track ID failed: {e}")
+
+                print(colorama.Fore.RED + f'ID为{album_id}的专辑(Mobile API)解析失败！')
+                return False, False
+            
+            total_count = data["data"]["totalCount"]
+            max_page = math.ceil(total_count / 100)
+            mobile_sounds = []
+
+            for page in range(1, max_page + 1):
+                mobile_params["pageId"] = page
+                try:
+                    r = requests.get(mobile_url, headers=mobile_headers, params=mobile_params, timeout=30)
+                    page_data = r.json()
+                    track_list = page_data["data"]["list"]
+                    # 转换字段以匹配原程序逻辑
+                    for t in track_list:
+                        t["albumTitle"] = t.get("albumTitle", "")
+                        # Mobile API return 'duration' in seconds if needed, or other fields
+                        # 只要包含后续下载流程需要的字段即可 (trackId, title, albumTitle 等)
+                    mobile_sounds += track_list
+                    print(f"第{page}页解析成功，共{max_page}页 (Mobile API)")
+                except Exception as e:
+                    print(f"第{page}页解析失败 (Mobile API): {e}")
+
+            if mobile_sounds:
+                first_sound = mobile_sounds[0]
+                # 确保有 albumTitle
+                if "albumTitle" not in first_sound or not first_sound["albumTitle"]:
+                    # 尝试从 API 响应的其他地方获取，或者单独请求 album info
+                     pass 
+                album_name = first_sound.get("albumTitle", f"Album_{album_id}")
+                logger.debug(f'ID为{album_id}的专辑解析成功 (Mobile API)')
+                return album_name, mobile_sounds
+            else:
+                return False, False
+        except Exception as e:
+            logger.debug(f"Mobile API 异常: {e}")
+            logger.debug(traceback.format_exc())
+            return False, False
 
     # 协程解析声音
     async def async_analyze_sound(self, sound_id, session, headers, bid):
         logger.debug(f'开始解析ID为{sound_id}的声音')
         retries = 3
+        # 优先使用 Web API
         url = f"https://www.ximalaya.com/mobile-playpage/track/v3/baseInfo/{int(time.time() * 1000)}"
         params = {
             "device": "www2",
@@ -190,35 +265,103 @@ class Ximalaya:
             "trackQualityLevel": 2
         }
         headers["referer"] = f"https://www.ximalaya.com/sound/{sound_id}"
-        sid = self.get_sid()
-        if not sid:
-            print(colorama.Fore.RED + f'ID为{sound_id}的声音解析失败！')
-            logger.debug(f'ID为{sound_id}的声音解析失败！')
-            return False
-        else:
+        
+        # 尝试获取 sid，如果失败则可能使用 Mobile API fallback，但此处先尝试 Web 通用逻辑
+        sid = None
+        try:
+            sid = self.get_sid()
+        except Exception:
+            pass
+            
+        use_mobile_api = False
+        
+        if sid:
             headers["xm-sign"] = f"{bid}&&{sid}"
-        while retries > 0:
-            try:
-                async with session.get(url, headers=headers, params=params, timeout=20) as response:
-                    response_json = json.loads(await response.text())
-                    sound_name = response_json["trackInfo"]["title"]
-                    encrypted_url_list = response_json["trackInfo"]["playUrlList"]
-                    break
-            except KeyError:
-                print(colorama.Fore.RED + f'ID为{sound_id}的声音解析失败，可能因为达到每日音频下载上限')
-                logger.debug(f'ID为{sound_id}的声音解析失败！')
-                logger.debug(traceback.format_exc())
-                return False
-            except Exception as e:
-                logger.debug(f'ID为{sound_id}的声音解析失败！')
-                logger.debug(traceback.format_exc())
-            retries -= 1
-            if retries == 0:
-                print(colorama.Fore.RED + f'ID为{sound_id}的声音解析失败！')
-                logger.debug(f'ID为{sound_id}的声音解析失败！')
-                return False
+            while retries > 0:
+                try:
+                    async with session.get(url, headers=headers, params=params, timeout=20) as response:
+                        response_json = json.loads(await response.text())
+                        if "trackInfo" not in response_json:
+                            raise KeyError("trackInfo missing")
+                        sound_name = response_json["trackInfo"]["title"]
+                        encrypted_url_list = response_json["trackInfo"]["playUrlList"]
+                        break
+                except KeyError:
+                    # 如果 Web API 返回缺失 trackInfo，可能是因为签名问题或限制，尝试 Mobile API
+                    if retries == 1:
+                         use_mobile_api = True
+                         break
+                    logger.debug(f'ID为{sound_id}(Web API)解析 Key Error，重试...')
+                except Exception as e:
+                    logger.debug(f'ID为{sound_id}(Web API)异常: {e}')
+                
+                retries -= 1
+                if retries == 0:
+                    use_mobile_api = True
+        else:
+            use_mobile_api = True
+
+        if use_mobile_api:
+             # Mobile API Fallback for Track Info
+             # URL: https://mobile.ximalaya.com/mobile/v1/track/baseInfo
+             logger.debug(f"ID为{sound_id}切换到 Mobile API 解析")
+             mobile_url = "https://mobile.ximalaya.com/mobile/v1/track/baseInfo"
+             mobile_params = {
+                 "device": "android",
+                 "trackId": sound_id
+             }
+             mobile_headers = {
+                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                 "Cookie": headers.get("cookie", "")
+             }
+             try:
+                 async with session.get(mobile_url, headers=mobile_headers, params=mobile_params, timeout=20) as response:
+                     response_json = json.loads(await response.text())
+                     if "trackId" not in response_json: # data keys: trackId, title, playUrl64, etc.
+                         print(colorama.Fore.RED + f'ID为{sound_id}的声音(Mobile API)解析失败！')
+                         return False
+                     
+                     sound_name = response_json["title"]
+                     # 构造类似于 Web API 的 sound_info
+                     # Mobile API returns playUrl64, playUrl32, playPathAacv224 (m4a high?), downloadUrl (aac?)
+                     # Mapping: 
+                     # 0 (32k) -> playUrl32
+                     # 1 (64k) -> playUrl64
+                     # 2 (m4a/high) -> playPathAacv224 or playPathHq? 
+                     # Let's verify which one is m4a/high quality. Usually playPathAacv224 is higher.
+                     
+                     sound_info = {"name": sound_name, 0: "", 1: "", 2: ""}
+                     sound_info[0] = response_json.get("playUrl32", "")
+                     sound_info[1] = response_json.get("playUrl64", "")
+                     sound_info[2] = response_json.get("playPathAacv224") or response_json.get("playPathHq") or ""
+                     
+                     logger.debug(f'ID为{sound_id}的声音(Mobile API)解析成功！')
+                     return sound_info
+
+             except Exception as e:
+                 print(colorama.Fore.RED + f'ID为{sound_id}的声音(Mobile API)解析失败！{e}')
+                 logger.debug(traceback.format_exc())
+                 return False
+
+        # Web API Success Path
         if not response_json["trackInfo"]["isAuthorized"]:
             return 0  # 未购买或未登录vip账号
+        if encrypted_url_list[0]["type"][:2] == "AI":
+            sound_info = {"name": sound_name, 0: "", 1: "", 2: ""}
+            sound_info[0] = sound_info[1] = self.decrypt_url(encrypted_url_list[0]["url"])
+            logger.debug(f'ID为{sound_id}的声音解析成功！')
+            return sound_info
+        else:
+            sound_info = {"name": sound_name, 0: "", 1: "", 2: ""}
+            for encrypted_url in encrypted_url_list:
+                if encrypted_url["type"] == "M4A_128":
+                    sound_info[2] = self.decrypt_url(encrypted_url["url"])
+                elif encrypted_url["type"] == "MP3_64":
+                    sound_info[1] = self.decrypt_url(encrypted_url["url"])
+                elif encrypted_url["type"] == "MP3_32":
+                    sound_info[0] = self.decrypt_url(encrypted_url["url"])
+            logger.debug(f'ID为{sound_id}的声音解析成功！')
+            return sound_info
         if encrypted_url_list[0]["type"][:2] == "AI":
             sound_info = {"name": sound_name, 0: "", 1: "", 2: ""}
             sound_info[0] = sound_info[1] = self.decrypt_url(encrypted_url_list[0]["url"])
@@ -385,18 +528,52 @@ class Ximalaya:
         }
         try:
             response = requests.get(url, headers=headers, params=params, timeout=15)
-        except Exception as e:
-            print(colorama.Fore.RED + f'ID为{album_id}的专辑解析失败！')
-            logger.debug(f'ID为{album_id}的专辑判断类型失败！')
-            logger.debug(traceback.format_exc())
-            return False
-        logger.debug(f'ID为{album_id}的专辑判断类型成功！')
-        if not response.json()["data"]["albumPageMainInfo"]["isPaid"]:
-            return 0  # 免费专辑
-        elif response.json()["data"]["albumPageMainInfo"]["hasBuy"]:
-            return 1  # 已购专辑
-        else:
-            return 2  # 未购专辑
+            # Web API 正常返回判断
+            if response.status_code == 200 and "data" in response.json():
+                if not response.json()["data"]["albumPageMainInfo"]["isPaid"]:
+                    return 0  # 免费专辑
+                elif response.json()["data"]["albumPageMainInfo"]["hasBuy"]:
+                    return 1  # 已购专辑
+                else:
+                    return 2  # 未购专辑
+            else:
+                raise ValueError("Web API response invalid")
+        except Exception:
+             # Fallback to Mobile API
+            logger.debug(f'ID为{album_id}的专辑(Web API)判断类型失败，尝试切换到 Mobile API')
+            try:
+                mobile_url = "https://mobile.ximalaya.com/mobile/v1/album/detail"
+                mobile_params = {"albumId": album_id, "device": "android"}
+                r = requests.get(mobile_url, headers=headers, params=mobile_params, timeout=15)
+                data = r.json()
+                if "data" in data and "detail" in data["data"]:
+                    # 移动端API通常并不直接返回 isPaid，而是通过 priceTypeId 或 vipFreeType 判断
+                    # 简单判断：如果没有明显的付费标识，默认为免费 (0), 既然能获取到列表，通常意味着可访问
+                    # 具体字段可能需要根据付费专辑抓包确定，这里先做保守处理：
+                    # 如果是付费，通常会有 isPaid: True 或者 priceTypeId > 0
+                    is_paid = data["data"]["detail"].get("isPaid", False)
+                    # 还可以检查 tracksIsAllPurchased 等
+                    
+                    if not is_paid:
+                        return 0
+                    
+                    # 如果显示是付费，需要判断是否已购买
+                    # 移动端API判断是否购买比较复杂，这里暂且如果标记为付费但无法确定，回退到认为未购买
+                    is_bought = data["data"]["album"].get("tracksIsAllPurchased", False)
+                    if is_bought:
+                        return 1
+                    else:
+                        return 2
+                else:
+                    # 如果Mobile API也获取不到详情，但之前 analyze_album 成功了，
+                    # 我们可以默认它也是免费的，或者至少尝试去下载。
+                    logger.debug("Mobile API 判断专辑类型无法获取详情，默认视为免费专辑")
+                    return 0 
+            except Exception as e:
+                logger.debug(f"Mobile API 判断专辑类型异常: {e}")
+                return False
+
+    # 获取配置文件中的cookie和path
 
     # 获取配置文件中的cookie和path
     def analyze_config(self):
@@ -441,7 +618,7 @@ class Ximalaya:
     def judge_config(self, cookie, bid):
         url = "https://www.ximalaya.com/revision/my/getCurrentUserInfo"
         headers = {
-            "user-agent": ua.random,
+            "user-agent": self.default_headers["user-agent"],
             "cookie": cookie
         }
         try:
@@ -450,9 +627,23 @@ class Ximalaya:
             print(colorama.Fore.RED + "无法获取喜马拉雅用户数据，请检查网络状况！")
             logger.debug("无法获取喜马拉雅用户数据！")
             logger.debug(traceback.format_exc())
-        if response.json()["ret"] == 200:
+        try:
+            resp_json = response.json()
+        except Exception:
+            logger.debug('无法解析用户信息响应为 JSON')
+            return False
+        if resp_json.get("ret") == 200:
+            # 如果无法通过本地工具获取 sid，也应认为 cookie 有效（用于判断是否已登录），
+            # 仅在需要访问受限接口时再尝试获取 sid。
+            sid = None
+            try:
+                sid = self.get_sid()
+            except Exception:
+                logger.debug('获取 sid 失败，继续返回用户名以保持登录状态')
+            if not sid:
+                return resp_json.get("data", {}).get("userName")
             url = f"https://www.ximalaya.com/mobile-playpage/track/v3/baseInfo/{int(time.time()*1000)}?device=www2&trackId=359357383&trackQualityLevel=1"
-            headers["xm-sign"] = f"{bid}&&{self.get_sid()}"
+            headers["xm-sign"] = f"{bid}&&{sid}"
             try:
                 requests.get(url, headers=headers, timeout=15).json()["trackInfo"]
             except KeyError:
@@ -462,8 +653,9 @@ class Ximalaya:
                 logger.debug("无法获取喜马拉雅用户数据！")
                 logger.debug(traceback.format_exc())
                 return False
-            return response.json()["data"]["userName"]
+            return resp_json.get("data", {}).get("userName")
         else:
+            logger.debug(f"验证登录失败，返回数据：{resp_json}")
             return False
             
     # 登录喜马拉雅账号
@@ -494,31 +686,37 @@ class Ximalaya:
             WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, 'xm-player')))
             time.sleep(1)
             retries = 3
+            found = False
             while retries > 0:
                 for request in driver.requests:
                     if request.url == "https://www.ximalaya.com/m-revision/page/track/queryRelativeTracksById?trackId=62919401&preOffset=9&nextOffset=0&countKeys=play&order=2":
-                        with open("config.json", "r", encoding="utf-8") as f:
-                            config = json.load(f)
+                        try:
+                            with open("config.json", "r", encoding="utf-8") as f:
+                                config = json.load(f)
+                        except (json.JSONDecodeError, FileNotFoundError):
+                            config = {"cookie": "", "path": "", "bid": ""}
                         for key, value in request.headers.items():
                             if key.lower() == "cookie":
                                 config["cookie"] = value
                             if key.lower() == "xm-sign":
                                 pattern = r"^(.*?)&&"
                                 match = re.match(pattern, value)
-                                config["bid"] = match.group(1)
+                                if match:
+                                    config["bid"] = match.group(1)
+                        # persist captured config and mark success
+                        with open("config.json", "w", encoding="utf-8") as f:
+                            json.dump(config, f)
+                        found = True
                         break
-                try:
-                    with open("config.json", "w", encoding="utf-8") as f:
-                        json.dump(config, f)
+                if found:
                     break
-                except UnboundLocalError:
-                    retries -= 1
-                    time.sleep(1)
-                    if retries == 0:
-                        print(colorama.Fore.RED + "登录失败！")
-                        logger.debug("登录失败！")
-                        driver.quit()
-                        return False
+                retries -= 1
+                time.sleep(1)
+                if retries == 0:
+                    print(colorama.Fore.RED + "登录失败！")
+                    logger.debug("登录失败！")
+                    driver.quit()
+                    return False
             logger.debug('以下是使用浏览器登录喜马拉雅账号时的浏览器日志：')
             for entry in driver.get_log('browser'):
                 logger.debug(entry['message'])

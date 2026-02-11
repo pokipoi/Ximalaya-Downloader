@@ -36,28 +36,43 @@ if __name__ == "__main__":
     except Exception:
         print(f"自动检测新版本失败，当前版本为{current_version}，建议手动前往github检查是否有新版本！")
     cookie, path, bid = ximalaya.analyze_config()
+    used_saved_cookie = False
     if not cookie or not bid:
-        username = False
+        verified_username = False
     else:
-        username = ximalaya.judge_config(cookie, bid)
+        verified_username = ximalaya.judge_config(cookie, bid)
+        if not verified_username:
+            print("无法验证已保存的登录信息，可能是网络问题或 cookie 已过期。将使用保存的 cookie 继续，若需重新登录请手动选择登录。")
+            used_saved_cookie = True
     if os.path.isdir(path):
         print(f"检测到已设置下载路径为{path}")
     else:
         print('在config文件中未检测到有效的下载路径，将使用默认下载路径./download')
         path = './download'
-    if not username:
+    if not verified_username and not used_saved_cookie:
         print("未检测到有效喜马拉雅登录信息或登录信息已过期，请登录后再使用")
         ximalaya.login()
         headers = {
-            "user-agent": ua.random,
+            "user-agent": ximalaya.default_headers["user-agent"],
+            "cookie": ximalaya.analyze_config()[0]
+        }
+        bid = ximalaya.analyze_config()[2]
+        logined = True
+    elif verified_username:
+        username = verified_username
+        print(f"已检测到有效登录信息，当前登录用户为{username}，如需切换账号请删除config.json文件然后重新启动本程序！")
+        headers = {
+            "user-agent": ximalaya.default_headers["user-agent"],
             "cookie": ximalaya.analyze_config()[0]
         }
         bid = ximalaya.analyze_config()[2]
         logined = True
     else:
-        print(f"已检测到有效登录信息，当前登录用户为{username}，如需切换账号请删除config.json文件然后重新启动本程序！")
+        # 使用保存但未验证的 cookie
+        username = "(保存的登录信息)"
+        print(f"使用保存的 cookie 继续，当前登录用户为{username}（未验证）。如遇权限问题请登录。")
         headers = {
-            "user-agent": ua.random,
+            "user-agent": ximalaya.default_headers["user-agent"],
             "cookie": ximalaya.analyze_config()[0]
         }
         bid = ximalaya.analyze_config()[2]
